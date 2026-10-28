@@ -17,6 +17,7 @@ export type AgentUnarchiveController = Pick<AgentManager, "notifyAgentState" | "
 export type AgentRunController = Pick<
   AgentManager,
   | "getAgent"
+  | "holdAgentRuntime"
   | "tryRunOutOfBand"
   | "hasInFlightRun"
   | "replaceAgentRun"
@@ -90,6 +91,21 @@ async function drainAgentRunIterator(
 }
 
 export async function startAgentRun(
+  agentManager: AgentRunController,
+  agentId: string,
+  prompt: AgentPromptInput,
+  logger: Logger,
+  options?: StartAgentRunOptions,
+): Promise<{ disposition: PromptDispatchDisposition }> {
+  const release = agentManager.holdAgentRuntime(agentId);
+  try {
+    return await startAgentRunHeld(agentManager, agentId, prompt, logger, options);
+  } finally {
+    release();
+  }
+}
+
+async function startAgentRunHeld(
   agentManager: AgentRunController,
   agentId: string,
   prompt: AgentPromptInput,
@@ -303,6 +319,17 @@ export async function waitForAgentRunStartWithTimeout(
 export async function sendPromptToAgent(
   params: SendPromptToAgentParams,
 ): Promise<{ disposition: PromptDispatchDisposition }> {
+  const release = params.agentManager.holdAgentRuntime(params.agentId);
+  try {
+    return await sendPromptToAgentHeld(params);
+  } finally {
+    release();
+  }
+}
+
+async function sendPromptToAgentHeld(
+  params: SendPromptToAgentParams,
+): Promise<{ disposition: PromptDispatchDisposition }> {
   const unarchive = params.unarchive ?? true;
 
   const record = await params.agentStorage.get(params.agentId);
@@ -336,6 +363,17 @@ export async function sendPromptToAgent(
 }
 
 export async function startCreatedAgentInitialPrompt(
+  params: StartCreatedAgentInitialPromptParams,
+): Promise<ManagedAgent> {
+  const release = params.agentManager.holdAgentRuntime(params.agentId);
+  try {
+    return await startCreatedAgentInitialPromptHeld(params);
+  } finally {
+    release();
+  }
+}
+
+async function startCreatedAgentInitialPromptHeld(
   params: StartCreatedAgentInitialPromptParams,
 ): Promise<ManagedAgent> {
   const currentSnapshot = params.agentManager.getAgent(params.agentId) ?? params.snapshot ?? null;

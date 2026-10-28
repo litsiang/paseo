@@ -40,6 +40,7 @@ export interface PiStartSessionInput {
 }
 
 export interface PiRuntimeSession {
+  getRuntimeProcessIdleState?(): "idle" | "unknown";
   onEvent(callback: (event: PiRuntimeEvent) => void): () => void;
   prompt(
     message: string,

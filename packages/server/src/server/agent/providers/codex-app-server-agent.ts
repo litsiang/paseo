@@ -4831,6 +4831,34 @@ export class CodexAppServerAgentSession implements AgentSession {
     }
   }
 
+  async getRuntimeIdleState(): Promise<"idle" | "busy" | "unknown"> {
+    if (this.getRuntimeProcessIdleState() !== "idle") return "unknown";
+    if (this.closed || !this.connected) return "unknown";
+    if (
+      this.currentTurnId ||
+      this.activeForegroundTurnId ||
+      this.pendingForegroundStart ||
+      this.pendingForegroundTurnIdentification ||
+      this.pendingPermissions.size ||
+      this.pendingManualCompactionStarts ||
+      this.pendingRootCompactionItemIds.size ||
+      this.pendingAnonymousRootCompactions ||
+      this.loadingPersistedHistory
+    )
+      return "busy";
+    // Interactive terminal sessions can outlive their tool response. Retain the
+    // runtime when their completion cannot be established from the native stream.
+    if (this.terminalCommandByProcessId.size) return "unknown";
+    for (const id of this.emittedExecCommandStartedCallIds) {
+      if (!this.emittedExecCommandCompletedCallIds.has(id)) return "busy";
+    }
+    return "idle";
+  }
+
+  getRuntimeProcessIdleState(): "idle" | "unknown" {
+    return this.client?.getRuntimeProcessIdleState() ?? "unknown";
+  }
+
   async close(): Promise<void> {
     this.closed = true;
     this.clearPendingPermissions();

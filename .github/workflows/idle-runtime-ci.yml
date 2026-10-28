@@ -1,0 +1,69 @@
+name: Idle runtime compatibility
+
+on:
+  pull_request:
+    branches: [loom-0.8]
+  push:
+    branches: [loom-0.8]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: idle-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ONNXRUNTIME_NODE_INSTALL: skip
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install server stack
+        run: npm ci --no-audit --no-fund --workspace=@getpaseo/server --workspace=@getpaseo/client --workspace=@getpaseo/protocol --workspace=@getpaseo/plugin --workspace=@getpaseo/relay --workspace=@getpaseo/highlight --include-workspace-root
+      - name: Install provider CLI fixtures
+        run: npm install -g @anthropic-ai/claude-code opencode-ai
+      - name: Build server declarations
+        run: npm run build:server-deps
+      - name: Typecheck affected stack
+        run: npm run typecheck --workspace=@getpaseo/protocol --workspace=@getpaseo/client --workspace=@getpaseo/server
+      - name: Check formatting
+        run: npm run format:check
+      - name: Lint changed TypeScript
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        shell: bash
+        run: |
+          base="$BASE_SHA"
+          if [[ -z "$base" || "$base" =~ ^0+$ ]]; then base=HEAD^; fi
+          mapfile -d '' files < <(git diff --name-only --diff-filter=ACM -z "$base" HEAD -- '*.ts' '*.tsx')
+          if (( ${#files[@]} )); then npm run lint -- "${files[@]}"; fi
+      - name: Protocol and client regressions
+        run: npm run test --workspace=@getpaseo/protocol -- --maxWorkers=2 --bail=1 && npm run test --workspace=@getpaseo/client -- --maxWorkers=2 --bail=1
+      - name: Native process and lifecycle regressions
+        run: >-
+          npx vitest run --maxWorkers=2 --bail=1
+          packages/server/src/server/agent/agent-manager.test.ts
+          packages/server/src/server/agent/agent-prompt.test.ts
+          packages/server/src/server/agent/permission-response.test.ts
+          packages/server/src/server/agent/create-agent/create.test.ts
+          packages/server/src/server/agent/mcp-server.test.ts
+          packages/server/src/server/schedule/service.test.ts
+          packages/server/src/server/agent/runtime-reclamation-policy.test.ts
+          packages/server/src/server/agent/providers/runtime-idle-state.test.ts
+          packages/server/src/server/agent/providers/jsonl-rpc-process.test.ts
+          packages/server/src/server/agent/providers/pi/agent.test.ts
+          packages/server/src/server/agent/providers/pi/cli-runtime.test.ts
+          packages/server/src/server/agent/providers/codex/app-server-transport.test.ts
+          packages/server/src/server/agent/providers/codex-app-server-agent.test.ts
+          packages/server/src/server/agent/providers/claude/agent.test.ts
+          packages/server/src/server/session.test.ts
+          packages/server/src/server/session.lifecycle-boundary.test.ts

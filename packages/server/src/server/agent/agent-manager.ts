@@ -329,6 +329,27 @@ export interface WaitForAgentOptions {
   waitForActive?: boolean;
 }
 
+export interface UnloadIdleAgentInput {
+  agentId: string;
+  expectedUpdatedAt: string;
+  expectedRuntimeGeneration: string;
+  idleForMs: number;
+  protection: () => string | null;
+}
+
+export interface UnloadIdleAgentResult {
+  agentId: string;
+  status: "unloaded" | "already_unloaded" | "retained" | "unknown";
+  reason: string | null;
+}
+
+class RuntimeUnloadRetainedError extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+    this.name = "RuntimeUnloadRetainedError";
+  }
+}
+
 export interface WaitForAgentResult {
   status: AgentLifecycleStatus;
   permission: AgentPermissionRequest | null;
@@ -371,6 +392,8 @@ interface HandleStreamEventOptions {
 
 interface ManagedAgentBase {
   id: string;
+  runtimeGeneration?: string;
+  runtimeLastActivityAt?: Date;
   provider: AgentProvider;
   cwd: string;
   /**
@@ -1614,6 +1637,124 @@ export class AgentManager {
     }
   }
 
+  private readonly runtimeHolds = new Map<string, number>();
+
+  private runtimeHasActiveWork(agent: ActiveManagedAgent): boolean {
+    return (
+      agent.lifecycle !== "idle" ||
+      this.hasInFlightRun(agent.id) ||
+      Boolean(agent.activeTurnId) ||
+      agent.pendingReplacement
+    );
+  }
+
+  holdAgentRuntime(agentId: string): () => void {
+    this.runtimeHolds.set(agentId, (this.runtimeHolds.get(agentId) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.runtimeHolds.get(agentId) ?? 1) - 1;
+      if (remaining) this.runtimeHolds.set(agentId, remaining);
+      else this.runtimeHolds.delete(agentId);
+    };
+  }
+
+  unloadAgentIfIdle(input: UnloadIdleAgentInput): Promise<UnloadIdleAgentResult> {
+    const { agentId } = input;
+    if (
+      !Number.isSafeInteger(input.idleForMs) ||
+      input.idleForMs < 0 ||
+      !Number.isFinite(Date.parse(input.expectedUpdatedAt))
+    ) {
+      return Promise.reject(new Error("Valid idle duration and state version required"));
+    }
+    if (this.inFlightAgentCloses.has(agentId)) {
+      return Promise.resolve({ agentId, status: "retained", reason: "runtime_closing" });
+    }
+    let lane: Promise<void> | undefined;
+    const operation = this.runLifecycleMutation(
+      agentId,
+      async (): Promise<UnloadIdleAgentResult> => {
+        const agent = this.agents.get(agentId);
+        if (!agent) return { agentId, status: "already_unloaded", reason: null };
+        const refusal = (): string | null => {
+          const protectedReason = input.protection();
+          if (protectedReason) return protectedReason;
+          if (
+            !agent.runtimeGeneration ||
+            agent.runtimeGeneration !== input.expectedRuntimeGeneration
+          )
+            return "runtime_changed";
+          if (
+            this.lifecycleMutationTails.get(agentId) !== lane ||
+            agent.updatedAt.toISOString() !== input.expectedUpdatedAt
+          )
+            return "state_changed";
+          if (this.runtimeHolds.has(agentId)) return "pending_prompt";
+          if (agent.session.getRuntimeProcessIdleState?.() !== "idle")
+            return "runtime_process_state_unknown";
+          if (this.runtimeHasActiveWork(agent)) return "active_work";
+          if (agent.pendingPermissions.size || agent.inFlightPermissionResponses.size)
+            return "pending_permission";
+          if (
+            this.providerSubagents.list(agentId).some((child) => child.status === "running") ||
+            [...this.agents.values()].some(
+              (child) =>
+                child.labels[PARENT_AGENT_ID_LABEL] === agentId && this.hasInFlightRun(child.id),
+            )
+          )
+            return "background_work";
+          if (!agent.persistence?.sessionId || agent.internal) return "unverified_persistence";
+          if (
+            !agent.runtimeLastActivityAt ||
+            Date.now() - agent.runtimeLastActivityAt.getTime() < input.idleForMs
+          )
+            return "idle_period_not_elapsed";
+          return null;
+        };
+        let reason = refusal();
+        if (reason) return { agentId, status: "retained", reason };
+        let closing = false;
+        try {
+          const native = await agent.session.getRuntimeIdleState?.();
+          if (native !== "idle")
+            return {
+              agentId,
+              status: "retained",
+              reason: native === "busy" ? "provider_busy" : "provider_state_unknown",
+            };
+          reason = refusal();
+          if (reason) return { agentId, status: "retained", reason };
+          closing = true;
+          await this.closeAgentRuntime(agentId, () => {
+            const currentReason = refusal();
+            if (currentReason) throw new RuntimeUnloadRetainedError(currentReason);
+          });
+          return { agentId, status: "unloaded", reason: null };
+        } catch (error) {
+          if (error instanceof RuntimeUnloadRetainedError)
+            return { agentId, status: "retained", reason: error.reason };
+          if (!closing) return { agentId, status: "retained", reason: "provider_state_unknown" };
+          this.logger.warn({ err: error, agentId }, "Conditional runtime unload outcome unknown");
+          return { agentId, status: "unknown", reason: "runtime_close_unconfirmed" };
+        }
+      },
+    );
+    lane = this.lifecycleMutationTails.get(agentId);
+    const barrier = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.inFlightAgentCloses.set(agentId, barrier);
+    const clear = () => {
+      if (this.inFlightAgentCloses.get(agentId) === barrier)
+        this.inFlightAgentCloses.delete(agentId);
+    };
+    void barrier.finally(clear);
+    return operation.finally(clear);
+  }
+
   closeAgent(agentId: string): Promise<void> {
     const existing = this.inFlightAgentCloses.get(agentId);
     if (existing) {
@@ -1634,7 +1775,7 @@ export class AgentManager {
     return close;
   }
 
-  private async closeAgentRuntime(agentId: string): Promise<void> {
+  private async closeAgentRuntime(agentId: string, beforeClose?: () => void): Promise<void> {
     const agent = this.requireAgent(agentId);
     this.logger.trace(
       {
@@ -1649,6 +1790,7 @@ export class AgentManager {
       "agent.manager.close.start",
     );
     await this.drainSessionEvents(agentId);
+    beforeClose?.();
     this.cancelRunningProviderSubagents(agentId);
     const closedAgent = this.prepareAgentForClosure(agent, "agent closed");
     let closeError: unknown;
@@ -2306,6 +2448,7 @@ export class AgentManager {
       }
       this.dispatchStream(agent.id, event, { timestamp: new Date().toISOString() });
     };
+    const release = this.holdAgentRuntime(agentId);
     void (async () => {
       try {
         await handler.run({ emit: dispatch });
@@ -2316,6 +2459,8 @@ export class AgentManager {
           provider: agent.provider,
           item: { type: "assistant_message", text: `[Error] ${text}` },
         });
+      } finally {
+        release();
       }
     })();
     return true;
@@ -3414,6 +3559,8 @@ export class AgentManager {
       });
 
       this.assertAcceptingAgentRegistrations();
+      managed.runtimeGeneration = randomUUID();
+      managed.runtimeLastActivityAt = new Date();
       this.agents.set(resolvedAgentId, managed);
       registered = true;
       // Initialize previousStatus to track transitions
@@ -3729,6 +3876,10 @@ export class AgentManager {
     agent: ActiveManagedAgent,
     event: AgentStreamEvent,
   ): Promise<void> {
+    // Usage polling and model metadata are not new work. Business events, including
+    // native background-task completion, restart the idle period.
+    if (event.type !== "usage_updated" && event.type !== "model_changed")
+      agent.runtimeLastActivityAt = new Date();
     if (event.type === "provider_subagent") {
       const update = this.providerSubagents.apply(agent.id, event.provider, event.event);
       this.dispatch({ type: "provider_subagent", event: update });

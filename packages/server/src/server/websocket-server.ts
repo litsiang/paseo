@@ -1413,6 +1413,10 @@ export class VoiceAssistantWebSocketServer {
       agentManager: this.agentManager,
       agentStorage: this.agentStorage,
       agentRequests: this.agentRequests,
+      isAgentRuntimeFocused: (agentId) =>
+        this.listSessions().some(
+          (session) => session.getClientActivity()?.focusedAgentId === agentId,
+        ),
       projectRegistry: this.projectRegistry,
       workspaceRegistry: this.workspaceRegistry,
       workspaceLabelService: this.workspaceLabelService ?? undefined,
@@ -1633,6 +1637,7 @@ export class VoiceAssistantWebSocketServer {
       ...(this.serverCapabilities ? { capabilities: this.serverCapabilities } : {}),
       features: {
         agentRequestReceipts: true,
+        idleRuntimeUnload: process.platform === "linux",
         hubAgentRpc: true,
         // COMPAT(directorySync): added in v0.3.x, remove gate after 2027-02-12.
         directorySync: true,

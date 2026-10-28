@@ -1,5 +1,6 @@
 import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
 import type { AgentRequests } from "./agent/requests/index.js";
+import { runtimeReclamationProtection } from "./agent/runtime-reclamation-policy.js";
 import equal from "fast-deep-equal";
 import { v4 as uuidv4 } from "uuid";
 import { lstat, mkdir, mkdtemp, rename, rm, stat } from "node:fs/promises";
@@ -464,6 +465,7 @@ export interface SessionOptions {
   worktreesRoot?: string;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
+  isAgentRuntimeFocused?: (agentId: string) => boolean;
   agentRequests: Pick<AgentRequests, "create" | "send">;
   projectRegistry: ProjectRegistry;
   workspaceRegistry: WorkspaceRegistry;
@@ -681,6 +683,7 @@ export class Session {
 
   private agentManager: AgentManager;
   private readonly agentStorage: AgentStorage;
+  private readonly isAgentRuntimeFocused: ((agentId: string) => boolean) | undefined;
   private readonly projectRegistry: ProjectRegistry;
   private readonly workspaceRegistry: WorkspaceRegistry;
   private readonly directorySync: DirectorySyncService;
@@ -758,6 +761,7 @@ export class Session {
   private readonly createAgentLifecycleDispatch: CreateAgentLifecycleDispatch;
 
   constructor(options: SessionOptions) {
+    this.isAgentRuntimeFocused = options.isAgentRuntimeFocused;
     const {
       clientId,
       permissions,
@@ -2002,6 +2006,7 @@ export class Session {
       this.dispatchAgentRelationshipMessage(msg) ??
       this.dispatchAgentTimelineMessage(msg, source) ??
       this.dispatchHubExecutionMessage(msg) ??
+      this.dispatchRuntimeReclamationMessage(msg) ??
       this.dispatchAgentLifecycleMessage(msg) ??
       this.dispatchAgentConfigMessage(msg) ??
       this.dispatchCheckoutMessage(msg) ??
@@ -2383,6 +2388,47 @@ export class Session {
       return this.hubExecutionController?.controlExecution(msg);
     }
     return undefined;
+  }
+
+  private dispatchRuntimeReclamationMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (msg.type === "agent.runtime.unload.request") return this.handleUnloadIdleAgent(msg);
+    return undefined;
+  }
+
+  private async handleUnloadIdleAgent(
+    msg: Extract<SessionInboundMessage, { type: "agent.runtime.unload.request" }>,
+  ): Promise<void> {
+    try {
+      const result = await this.agentManager.unloadAgentIfIdle({
+        agentId: msg.agentId,
+        expectedUpdatedAt: msg.expectedUpdatedAt,
+        idleForMs: msg.idleForMs,
+        expectedRuntimeGeneration: msg.expectedRuntimeGeneration,
+        protection: () => {
+          if (msg.protectedAgentIds?.includes(msg.agentId)) return "protected_agent";
+          const policy = runtimeReclamationProtection(this.paseoHome, msg.agentId);
+          if (policy) return policy;
+          if (!this.isAgentRuntimeFocused) return "focus_state_unknown";
+          return this.isAgentRuntimeFocused(msg.agentId) ? "focused_agent" : null;
+        },
+      });
+      this.emit({
+        type: "agent.runtime.unload.response",
+        payload: { requestId: msg.requestId, ...result, error: null },
+      });
+    } catch (error) {
+      this.sessionLogger.warn({ err: error, agentId: msg.agentId }, "Conditional unload failed");
+      this.emit({
+        type: "agent.runtime.unload.response",
+        payload: {
+          requestId: msg.requestId,
+          agentId: msg.agentId,
+          status: "unknown",
+          reason: "request_failed",
+          error: "Runtime unload could not be confirmed",
+        },
+      });
+    }
   }
 
   private dispatchAgentLifecycleMessage(msg: SessionInboundMessage): Promise<void> | undefined {
