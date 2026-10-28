@@ -1,3 +1,4 @@
+import { createRuntimeIdleCheck } from "../runtime-idle-state.js";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -2662,6 +2663,27 @@ class ClaudeAgentSession implements AgentSession {
     return this.persistence;
   }
 
+  private idleProcessCheck: (() => "idle" | "unknown") | undefined;
+
+  getRuntimeProcessIdleState(): "idle" | "unknown" {
+    return this.idleProcessCheck?.() ?? "unknown";
+  }
+
+  async getRuntimeIdleState(): Promise<"idle" | "busy" | "unknown"> {
+    if (this.getRuntimeProcessIdleState() !== "idle") return "unknown";
+    if (this.closed) return "unknown";
+    if (
+      this.activeForegroundTurnId ||
+      this.autonomousTurn ||
+      this.compacting ||
+      this.turnState !== "idle" ||
+      this.toolUseInputBuffers.size ||
+      this.getPendingPermissions().length
+    )
+      return "busy";
+    return "idle";
+  }
+
   async close(): Promise<void> {
     this.logger.trace(
       {
@@ -3149,6 +3171,7 @@ class ClaudeAgentSession implements AgentSession {
         queryFactory: this.queryFactory,
         onChildProcess: (child) => {
           this.childProcess = child;
+          this.idleProcessCheck = createRuntimeIdleCheck(child);
           child.once("exit", (code, signal) => this.handleRuntimeExit(child, code, signal));
         },
       },

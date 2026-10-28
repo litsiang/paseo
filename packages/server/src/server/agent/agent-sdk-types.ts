@@ -685,6 +685,9 @@ export interface AgentSession {
   interrupt(): Promise<void>;
   /** Release live runtime resources without archiving or deleting the durable native session. */
   close(): Promise<void>;
+  /** Native queues, tools and background work must be settled before automatic unloading. */
+  getRuntimeIdleState?(): Promise<"idle" | "busy" | "unknown">;
+  getRuntimeProcessIdleState?(): "idle" | "unknown";
   listCommands?(): Promise<AgentSlashCommand[]>;
   setModel?(modelId: string | null): Promise<void>;
   setThinkingOption?(thinkingOptionId: string | null): Promise<void | AgentProviderNotice>;

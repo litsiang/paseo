@@ -11,6 +11,10 @@ import type { AgentStreamEvent } from "../messages.js";
 import { respondToAgentPermission } from "./permission-response.js";
 
 class FakePermissionAgentManager {
+  holdAgentRuntime(): () => void {
+    return () => {};
+  }
+
   permissionResult: AgentPermissionResult | void;
   hasRunInFlight = false;
   outOfBandHandled = false;

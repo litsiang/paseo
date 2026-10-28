@@ -853,6 +853,9 @@ const AgentActiveTurnPayloadSchema = z.object({
 
 export const AgentSnapshotPayloadSchema = z.object({
   id: z.string(),
+  // COMPAT(idleRuntimeUnload): live runtime identity; deliberately not persisted.
+  runtimeGeneration: z.string().optional(),
+  runtimeLastActivityAt: z.string().optional(),
   provider: AgentProviderSchema,
   cwd: z.string(),
   workspaceId: z.string().optional(),
@@ -963,6 +966,16 @@ export const ArchiveAgentRequestMessageSchema = z.object({
   type: z.literal("archive_agent_request"),
   agentId: z.string(),
   requestId: z.string(),
+});
+
+export const UnloadIdleAgentRequestSchema = z.object({
+  type: z.literal("agent.runtime.unload.request"),
+  requestId: z.string(),
+  agentId: z.string(),
+  expectedUpdatedAt: z.string().min(1).max(64),
+  expectedRuntimeGeneration: z.string().min(1).max(128),
+  idleForMs: z.number().int().min(0).max(604800000),
+  protectedAgentIds: z.array(z.string()).max(256).optional(),
 });
 
 export const CloseItemsRequestMessageSchema = z.object({
@@ -3082,6 +3095,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   FetchAgentRequestMessageSchema,
   DeleteAgentRequestMessageSchema,
   ArchiveAgentRequestMessageSchema,
+  UnloadIdleAgentRequestSchema,
   CloseItemsRequestMessageSchema,
   UpdateAgentRequestMessageSchema,
   ProjectRenameRequestSchema,
@@ -3433,6 +3447,8 @@ export const ServerInfoStatusPayloadSchema = z
       .object({
         // COMPAT(agentRequestReceipts): added in v0.8.0; remove gate after 2027-03-05.
         agentRequestReceipts: z.boolean().optional(),
+        // COMPAT(idleRuntimeUnload): optional for older daemons.
+        idleRuntimeUnload: z.boolean().optional(),
         // COMPAT(hubAgentRpc): added in v0.8.0; remove gate after 2027-03-05.
         hubAgentRpc: z.boolean().optional(),
         providersSnapshot: z.boolean().optional(),
@@ -4434,6 +4450,17 @@ export const FetchAgentResponseMessageSchema = z.object({
     requestId: z.string(),
     agent: AgentSnapshotPayloadSchema.nullable(),
     project: ProjectPlacementPayloadSchema.nullable().optional(),
+    error: z.string().nullable(),
+  }),
+});
+
+export const UnloadIdleAgentResponseSchema = z.object({
+  type: z.literal("agent.runtime.unload.response"),
+  payload: z.object({
+    requestId: z.string(),
+    agentId: z.string(),
+    status: z.enum(["unloaded", "already_unloaded", "retained", "unknown"]),
+    reason: z.string().nullable(),
     error: z.string().nullable(),
   }),
 });
@@ -6533,6 +6560,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   LegacyOpenInEditorResponseMessageSchema,
   ArchiveWorkspaceResponseMessageSchema,
   FetchAgentResponseMessageSchema,
+  UnloadIdleAgentResponseSchema,
   FetchAgentTimelineResponseMessageSchema,
   AgentTimelineReplacementMessageSchema,
   AgentTimelineListPromptsResponseMessageSchema,
@@ -6749,6 +6777,8 @@ export type LegacyOpenInEditorResponseMessage = z.infer<
 >;
 export type ArchiveWorkspaceResponseMessage = z.infer<typeof ArchiveWorkspaceResponseMessageSchema>;
 export type FetchAgentResponseMessage = z.infer<typeof FetchAgentResponseMessageSchema>;
+export type UnloadIdleAgentRequest = z.infer<typeof UnloadIdleAgentRequestSchema>;
+export type UnloadIdleAgentOptions = Omit<UnloadIdleAgentRequest, "type" | "requestId">;
 export type FetchAgentTimelineResponseMessage = z.infer<
   typeof FetchAgentTimelineResponseMessageSchema
 >;

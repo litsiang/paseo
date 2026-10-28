@@ -1,5 +1,5 @@
 import { ProviderSnapshotUpdates } from "./provider-snapshots/index.js";
-import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
+import type { SessionEventSubscription, UnloadIdleAgentOptions } from "@getpaseo/protocol/messages";
 import {
   ConnectionSubscriptions,
   DEFAULT_CLIENT_CAPABILITIES,
@@ -2665,6 +2665,15 @@ export class DaemonClient {
     if (!payload.accepted) {
       throw new Error(payload.error ?? "detachAgent rejected");
     }
+  }
+
+  async unloadAgentIfIdle(input: UnloadIdleAgentOptions) {
+    if (this.lastServerInfoMessage?.features?.idleRuntimeUnload !== true) {
+      throw new Error("Conditional idle runtime unloading is unavailable on this host");
+    }
+    return this.sendNamespacedCorrelatedSessionRequest<"agent.runtime.unload.response">({
+      message: { type: "agent.runtime.unload.request", ...input },
+    });
   }
 
   async updateAgent(
