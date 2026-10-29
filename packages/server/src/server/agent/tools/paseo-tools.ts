@@ -1,3 +1,4 @@
+import { AgentMcpScopeError, isAgentObservationTool } from "../mcp-access.js";
 import { z } from "zod";
 import { ensureValidJson } from "../../json-utils.js";
 import type { Logger } from "pino";
@@ -131,6 +132,7 @@ export interface PaseoToolHostDependencies {
   browserToolsEnabled?: boolean;
   browserToolsBroker?: BrowserToolsBroker | null;
   paseoToolPolicy?: ProviderPaseoToolsPolicy;
+  agentObservationOnly?: boolean;
   paseoHome?: string;
   worktreesRoot?: string;
   /**
@@ -579,6 +581,9 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Tool handlers are schema-validated at registration boundaries.
     handler: (input: any, context: PaseoToolExecutionContext) => Promise<PaseoToolResult>,
   ) => {
+    if (options.agentObservationOnly && !isAgentObservationTool(name)) {
+      return;
+    }
     if (!isPaseoToolEnabled(options.paseoToolPolicy, name)) {
       return;
     }
@@ -1970,6 +1975,9 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async ({ agentId }) => {
+      if (options.agentObservationOnly && agentId !== callerAgentId) {
+        throw new AgentMcpScopeError();
+      }
       const snapshot = agentManager.getAgent(agentId);
       if (snapshot) {
         const structuredSnapshot = await serializeSnapshotWithMetadata(
@@ -2032,14 +2040,19 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       const requestedCwd = cwd?.trim() ? expandUserPath(cwd) : callerCwd;
       const statusFilter = statuses && statuses.length > 0 ? new Set(statuses) : null;
       const sinceMs = Date.now() - sinceHours * 60 * 60 * 1000;
-      const liveSnapshots = agentManager.listAgents();
+      const liveSnapshots = agentManager
+        .listAgents()
+        .filter((agent) => !options.agentObservationOnly || agent.id === callerAgentId);
       const liveAgents = await Promise.all(
         liveSnapshots.map((snapshot) =>
           serializeSnapshotWithMetadata(agentStorage, snapshot, childLogger),
         ),
       );
       const liveIds = new Set(liveSnapshots.map((snapshot) => snapshot.id));
-      const storedRecords = await agentStorage.list();
+      const allStoredRecords = await agentStorage.list();
+      const storedRecords = allStoredRecords.filter(
+        (record) => !options.agentObservationOnly || record.id === callerAgentId,
+      );
       const registeredProviderIds = new Set(providerSnapshotManager.listRegisteredProviderIds());
       const storedAgents = storedRecords
         .filter((record) => !record.internal && !liveIds.has(record.id))

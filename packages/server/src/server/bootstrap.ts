@@ -1,3 +1,4 @@
+import { createAgentMcpAccessCandidate } from "./agent/mcp-access.js";
 import { describeHookWorkspace } from "./plugins/lifecycle/index.js";
 import express from "express";
 import { createServer as createHTTPServer, type IncomingMessage, type ServerResponse } from "http";
@@ -570,6 +571,11 @@ export async function createPaseoDaemon(
   rootLogger: Logger,
   dependencies: PaseoDaemonDependencies = {},
 ): Promise<PaseoDaemon> {
+  const agentIsolationCandidate = process.env.PASEO_AGENT_ISOLATION_CANDIDATE === "1";
+  const agentMcpAccess = createAgentMcpAccessCandidate({
+    enabled: agentIsolationCandidate,
+    password: config.auth?.password,
+  });
   configureGitProcessPolicy(config.git ?? resolveGitProcessPolicy({ env: process.env }));
   const logger = rootLogger.child({ module: "bootstrap" });
   const obsoleteTimelineDirectory = path.join(config.paseoHome, "agent-timelines");
@@ -929,6 +935,8 @@ export async function createPaseoDaemon(
       workspaceGitService.onWorkspaceStateMayHaveChanged(cwd);
     },
     mcpAuthToken: agentMcpAuthToken,
+    issueAgentMcpToken: (agentId) =>
+      agentMcpAccess ? agentMcpAccess.issue(agentId) : agentMcpAuthToken,
     resolvePaseoToolPolicy: (provider) =>
       resolvePaseoToolPolicy(provider, daemonConfigStore.get().providers),
     logger,
@@ -1341,6 +1349,7 @@ export async function createPaseoDaemon(
   });
   await scheduleService.start();
   agentManager.setAgentArchivedCallback(async (agentId) => {
+    agentMcpAccess?.revoke(agentId);
     try {
       await scheduleService.completeForAgent(agentId);
     } catch (error) {
@@ -1362,6 +1371,7 @@ export async function createPaseoDaemon(
   const createAgentToolHostDependencies = (
     runtime: PaseoToolRuntimeContext,
   ): PaseoToolHostDependencies => ({
+    agentObservationOnly: agentIsolationCandidate && runtime.callerAgentId !== undefined,
     agentManager,
     agentStorage,
     terminalManager,
@@ -1477,19 +1487,36 @@ export async function createPaseoDaemon(
         res.status(404).json({ error: "Agent MCP endpoint disabled" });
         return;
       }
-      // This route is exempt from the global daemon-password middleware, so it
-      // authenticates here using the injected capability token (or a valid
-      // daemon password). Without this, a password-protected daemon would be
-      // wide open on its agent control plane.
-      if (
-        !(await isAgentMcpRequestAuthorized({
+      let callerAgentId: string | undefined;
+      if (agentMcpAccess) {
+        const principal = await agentMcpAccess.authenticate({
+          password: config.auth?.password ?? "",
+          authorizationHeader: req.header("authorization"),
+          callerAgentId: req.query.callerAgentId,
+        });
+        if (!principal) {
+          res.status(401).json({ error: "Unauthorized" });
+          return;
+        }
+        if (principal.kind === "agent") {
+          callerAgentId = principal.agentId;
+        }
+      } else {
+        const authorized = await isAgentMcpRequestAuthorized({
           password: config.auth?.password,
           capabilityToken: agentMcpAuthToken,
           authorizationHeader: req.header("authorization"),
-        }))
-      ) {
-        res.status(401).json({ error: "Unauthorized" });
-        return;
+        });
+        if (!authorized) {
+          res.status(401).json({ error: "Unauthorized" });
+          return;
+        }
+        const callerAgentIdRaw = req.query.callerAgentId;
+        if (typeof callerAgentIdRaw === "string") {
+          callerAgentId = callerAgentIdRaw;
+        } else if (Array.isArray(callerAgentIdRaw) && typeof callerAgentIdRaw[0] === "string") {
+          callerAgentId = callerAgentIdRaw[0];
+        }
       }
       if (config.mcpDebug) {
         logger.debug(
@@ -1517,13 +1544,6 @@ export async function createPaseoDaemon(
             id: null,
           });
           return;
-        }
-        const callerAgentIdRaw = req.query.callerAgentId;
-        let callerAgentId: string | undefined;
-        if (typeof callerAgentIdRaw === "string") {
-          callerAgentId = callerAgentIdRaw;
-        } else if (Array.isArray(callerAgentIdRaw) && typeof callerAgentIdRaw[0] === "string") {
-          callerAgentId = callerAgentIdRaw[0];
         }
         const { server, transport } = await createAgentMcpSession(callerAgentId);
         res.on("close", () => {

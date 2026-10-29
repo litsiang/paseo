@@ -50,6 +50,26 @@ A delegating principal can grant only authority it already possesses. A session 
 
 Workspace-scoped grants require every resource-bearing operation and outbound observation to enforce the same workspace boundary. File preview currently accepts any daemon-readable regular file, so it must gain resource enforcement before workspace-specific access ships.
 
+## Agent isolation candidate
+
+`PASEO_AGENT_ISOLATION_CANDIDATE=1` selects an unactivated server-side candidate.
+It requires a configured owner password before the daemon opens any listeners.
+The ordinary UI continues to use owner bearer authentication. Each agent receives
+its own MCP credential; the server binds its identity without trusting a query
+parameter. Agent HTTP and native catalogs permit only self-observation through
+`list_agents` and `get_agent_status`. New tools require explicit review. Issuing
+a replacement credential, archiving the agent, or restarting the daemon
+invalidates the old credential. The old daemon-wide agent credential has no
+access in this mode.
+
+Leave this candidate disabled on a shared-UID host. It does not establish OS
+isolation: workers can still read owner credentials or modify daemon code when
+they share the owner's UID. Activation requires independently protected owner
+credentials and code, separate worker execution for every provider, terminal,
+and script path, and a reviewed owner-only operation bridge. Those deployment
+and bridge changes are outside this candidate; fixture tests are not evidence
+of production isolation.
+
 ## Hub
 
 The Hub authenticates as a service principal. Its locally selected grants decide whether it may execute agents, manage the daemon, manage tunnels, or manage access.
