@@ -1,3 +1,4 @@
+import { createRuntimeIdleCheck } from "../runtime-idle-state.js";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 import type { Logger } from "pino";
@@ -168,6 +169,10 @@ function readProviderTurnId(params: unknown): string | undefined {
 }
 
 export class CodexAppServerClient {
+  private readonly idleProcessCheck: () => "idle" | "unknown";
+  getRuntimeProcessIdleState(): "idle" | "unknown" {
+    return this.idleProcessCheck();
+  }
   private readonly rl: readline.Interface;
   private readonly pending = new Map<number, PendingRequest>();
   private readonly requestHandlers = new Map<string, RequestHandler>();
@@ -182,6 +187,7 @@ export class CodexAppServerClient {
     private readonly logger: Logger,
     private readonly getTraceContext: () => CodexAppServerTraceContext = () => ({}),
   ) {
+    this.idleProcessCheck = createRuntimeIdleCheck(child);
     this.rl = readline.createInterface({ input: child.stdout });
     this.rl.on("line", (line) => {
       void this.handleLine(line).catch((error) => {

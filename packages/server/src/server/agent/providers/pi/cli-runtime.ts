@@ -81,6 +81,9 @@ export class PiCliRuntime implements PiRuntime {
 }
 
 class PiCliRuntimeSession implements PiRuntimeSession {
+  getRuntimeProcessIdleState(): "idle" | "unknown" {
+    return this.process.getRuntimeProcessIdleState();
+  }
   private readonly subscribers = new Set<(event: PiRuntimeEvent) => void>();
 
   constructor(

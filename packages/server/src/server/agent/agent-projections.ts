@@ -110,6 +110,12 @@ export function toAgentPayload(
 
   const payload: AgentSnapshotPayload = {
     id: agent.id,
+    ...(agent.lifecycle !== "closed" && agent.runtimeGeneration
+      ? { runtimeGeneration: agent.runtimeGeneration }
+      : {}),
+    ...(agent.lifecycle === "idle" && agent.runtimeLastActivityAt
+      ? { runtimeLastActivityAt: agent.runtimeLastActivityAt.toISOString() }
+      : {}),
     provider: agent.provider,
     cwd: agent.cwd,
     ...(agent.workspaceId ? { workspaceId: agent.workspaceId } : {}),

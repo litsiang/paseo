@@ -1628,6 +1628,36 @@ export class PiRpcAgentSession implements AgentSession {
     return await resultPromise;
   }
 
+  async getRuntimeIdleState(): Promise<"idle" | "busy" | "unknown"> {
+    if (this.getRuntimeProcessIdleState() !== "idle") return "unknown";
+    if (this.closed) return "unknown";
+    if (
+      this.activeTurnId ||
+      this.activeTurnStarted ||
+      this.activeToolCalls.size ||
+      this.pendingExtensionUiRequests.size ||
+      this.pendingExtensionResults.size ||
+      this.pendingSteerSubmissions.length ||
+      this.outOfBandCompactionStarted
+    )
+      return "busy";
+    const state = await this.runtimeSession.getState();
+    if (
+      typeof state.isStreaming !== "boolean" ||
+      typeof state.isCompacting !== "boolean" ||
+      !Number.isSafeInteger(state.pendingMessageCount) ||
+      state.pendingMessageCount < 0
+    )
+      return "unknown";
+    return state.isStreaming || state.isCompacting || state.pendingMessageCount > 0
+      ? "busy"
+      : "idle";
+  }
+
+  getRuntimeProcessIdleState(): "idle" | "unknown" {
+    return this.runtimeSession.getRuntimeProcessIdleState?.() ?? "unknown";
+  }
+
   async close(): Promise<void> {
     if (this.closed) {
       return;

@@ -18,8 +18,13 @@ import { InMemoryAgentTimelineStore } from "./agent-timeline-store.js";
 import { toAgentPayload } from "./agent-projections.js";
 import { projectTimelineRows } from "./timeline-projection.js";
 import { getOpenAgentTabLabel, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
-import { formatSystemNotificationPrompt, startAgentRun } from "./agent-prompt.js";
+import {
+  formatSystemNotificationPrompt,
+  startAgentRun,
+  sendPromptToAgent,
+} from "./agent-prompt.js";
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
+import { respondToAgentPermission } from "./permission-response.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent-loading.js";
 import type { StoredAgentRecord } from "./agent-storage.js";
 import type {
@@ -36,6 +41,7 @@ import type {
   AgentPromptInput,
   AgentProvider,
   AgentPersistenceHandle,
+  AgentPermissionResult,
   AgentRunOptions,
   AgentRunResult,
   AgentSession,
@@ -510,7 +516,7 @@ class TestAgentSession implements AgentSession {
     return [];
   }
 
-  async respondToPermission(): Promise<void> {}
+  async respondToPermission(): Promise<AgentPermissionResult | void> {}
 
   describePersistence() {
     return {
@@ -561,11 +567,343 @@ class McpCapableTestAgentSession extends TestAgentSession {
 
 class CloseRecordingTestAgentSession extends TestAgentSession {
   closed = false;
+  getRuntimeProcessIdleState(): "idle" {
+    return "idle";
+  }
+
+  async getRuntimeIdleState(): Promise<"idle"> {
+    return "idle";
+  }
 
   override async close(): Promise<void> {
     this.closed = true;
   }
 }
+
+test("conditional runtime unload retains identity and refuses busy, protected and changed agents", async () => {
+  const logger = createTestLogger();
+  let session: CloseRecordingTestAgentSession | undefined;
+  const client = new (class extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      session = new CloseRecordingTestAgentSession(config);
+      return session;
+    }
+  })();
+  const manager = new AgentManager({ clients: { codex: client }, logger });
+  const agent = await manager.createAgent({ provider: "codex", cwd: process.cwd() }, undefined, {});
+  const input = {
+    agentId: agent.id,
+    expectedUpdatedAt: agent.updatedAt.toISOString(),
+    expectedRuntimeGeneration: agent.runtimeGeneration ?? "",
+    idleForMs: 0,
+    protection: () => null,
+  };
+  try {
+    expect(
+      await manager.unloadAgentIfIdle({ ...input, protection: () => "coordinator" }),
+    ).toMatchObject({ status: "retained", reason: "coordinator" });
+    expect(session?.closed).toBe(false);
+    expect(
+      await manager.unloadAgentIfIdle({ ...input, expectedUpdatedAt: "2000-01-01T00:00:00.000Z" }),
+    ).toMatchObject({ status: "retained", reason: "state_changed" });
+    const release = manager.holdAgentRuntime(agent.id);
+    expect(await manager.unloadAgentIfIdle(input)).toMatchObject({
+      status: "retained",
+      reason: "pending_prompt",
+    });
+    release();
+    expect(await manager.unloadAgentIfIdle(input)).toMatchObject({
+      status: "unloaded",
+      agentId: agent.id,
+    });
+    expect(session?.closed).toBe(true);
+    expect(manager.getAgent(agent.id)).toBeNull();
+    expect(await manager.unloadAgentIfIdle(input)).toMatchObject({ status: "already_unloaded" });
+  } finally {
+    await manager.closeAgent(agent.id);
+  }
+});
+
+test("a prompt accepted during native idle inspection prevents unloading", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "paseo-idle-prompt-race-"));
+  const logger = createTestLogger();
+  const storage = new AgentStorage(workdir, logger);
+  const inspecting = deferred<void>(),
+    observed = deferred<void>();
+  let session: CloseRecordingTestAgentSession | undefined;
+  const client = new (class extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      session = new (class extends CloseRecordingTestAgentSession {
+        override async getRuntimeIdleState(): Promise<"idle"> {
+          inspecting.resolve();
+          await observed.promise;
+          return "idle";
+        }
+      })(config);
+      return session;
+    }
+  })();
+  const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+  const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {});
+  try {
+    const unloading = manager.unloadAgentIfIdle({
+      agentId: agent.id,
+      expectedUpdatedAt: agent.updatedAt.toISOString(),
+      expectedRuntimeGeneration: agent.runtimeGeneration ?? "",
+      idleForMs: 0,
+      protection: () => null,
+    });
+    await inspecting.promise;
+    const sent = sendPromptToAgent({
+      agentManager: manager,
+      agentStorage: storage,
+      agentId: agent.id,
+      prompt: "continue original work",
+      logger,
+    });
+    observed.resolve();
+    expect(await unloading).toMatchObject({ status: "retained", reason: "pending_prompt" });
+    await sent;
+    expect(session?.closed).toBe(false);
+    expect(manager.getAgent(agent.id)?.id).toBe(agent.id);
+  } finally {
+    observed.resolve();
+    await manager.closeAgent(agent.id);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("direct run dispatch prevents unloading before the foreground run is registered", async () => {
+  const logger = createTestLogger();
+  const dispatching = deferred<void>();
+  const continueDispatch = deferred<void>();
+  const client = new (class extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new CloseRecordingTestAgentSession(config);
+    }
+  })();
+  const manager = new AgentManager({ clients: { codex: client }, logger });
+  const agent = await manager.createAgent({ provider: "codex", cwd: process.cwd() }, undefined, {});
+  vi.spyOn(manager, "steerOrReplaceActiveTurn").mockImplementationOnce(async () => {
+    dispatching.resolve();
+    await continueDispatch.promise;
+    return { status: "inactive" };
+  });
+  const dispatch = startAgentRun(manager, agent.id, "scheduled work", logger, {
+    activeTurnBehavior: "steer",
+  });
+  void dispatch.catch(() => undefined);
+  try {
+    await dispatching.promise;
+    expect(manager.hasInFlightRun(agent.id)).toBe(false);
+    expect(
+      await manager.unloadAgentIfIdle({
+        agentId: agent.id,
+        expectedUpdatedAt: agent.updatedAt.toISOString(),
+        expectedRuntimeGeneration: agent.runtimeGeneration ?? "",
+        idleForMs: 0,
+        protection: () => null,
+      }),
+    ).toMatchObject({ status: "retained", reason: "pending_prompt" });
+    continueDispatch.resolve();
+    expect(await dispatch).toEqual({ disposition: "turn_started" });
+    expect(manager.getAgent(agent.id)).not.toBeNull();
+  } finally {
+    continueDispatch.resolve();
+    await dispatch.catch(() => undefined);
+    await manager.closeAgent(agent.id);
+  }
+});
+
+test("permission follow-up handoff prevents unloading after permission bookkeeping is cleared", async () => {
+  const logger = createTestLogger();
+  const responded = deferred<void>();
+  const continueResponse = deferred<void>();
+  const client = new (class extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new (class extends CloseRecordingTestAgentSession {
+        override async respondToPermission(): Promise<AgentPermissionResult> {
+          return { followUpPrompt: "continue approved work" };
+        }
+      })(config);
+    }
+  })();
+  const manager = new AgentManager({ clients: { codex: client }, logger });
+  const agent = await manager.createAgent({ provider: "codex", cwd: process.cwd() }, undefined, {});
+  const respond = manager.respondToPermission.bind(manager);
+  vi.spyOn(manager, "respondToPermission").mockImplementationOnce(async (...args) => {
+    const result = await respond(...args);
+    responded.resolve();
+    await continueResponse.promise;
+    return result;
+  });
+  const response = respondToAgentPermission({
+    agentManager: manager,
+    agentId: agent.id,
+    requestId: "permission-1",
+    response: { behavior: "allow" },
+    logger,
+  });
+  void response.catch(() => undefined);
+  try {
+    await responded.promise;
+    const current = manager.getAgent(agent.id)!;
+    expect(current.pendingPermissions.size).toBe(0);
+    expect(manager.hasInFlightRun(agent.id)).toBe(false);
+    expect(
+      await manager.unloadAgentIfIdle({
+        agentId: agent.id,
+        expectedUpdatedAt: current.updatedAt.toISOString(),
+        expectedRuntimeGeneration: current.runtimeGeneration ?? "",
+        idleForMs: 0,
+        protection: () => null,
+      }),
+    ).toMatchObject({ status: "retained", reason: "pending_prompt" });
+    continueResponse.resolve();
+    await response;
+    expect(manager.getAgent(agent.id)).not.toBeNull();
+  } finally {
+    continueResponse.resolve();
+    await response.catch(() => undefined);
+    await manager.closeAgent(agent.id);
+  }
+});
+
+test("asynchronous out-of-band work prevents unloading until its handler completes", async () => {
+  const logger = createTestLogger();
+  const finish = deferred<void>();
+  const client = new (class extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new (class extends CloseRecordingTestAgentSession {
+        override tryHandleOutOfBand() {
+          return {
+            run: async () => {
+              await finish.promise;
+            },
+          };
+        }
+      })(config);
+    }
+  })();
+  const manager = new AgentManager({ clients: { codex: client }, logger });
+  const agent = await manager.createAgent({ provider: "codex", cwd: process.cwd() }, undefined, {});
+  const input = {
+    agentId: agent.id,
+    expectedUpdatedAt: agent.updatedAt.toISOString(),
+    expectedRuntimeGeneration: agent.runtimeGeneration ?? "",
+    idleForMs: 0,
+    protection: () => null,
+  };
+  try {
+    expect(await startAgentRun(manager, agent.id, "/goal pause", logger)).toEqual({
+      disposition: "out_of_band",
+    });
+    expect(await manager.unloadAgentIfIdle(input)).toMatchObject({
+      status: "retained",
+      reason: "pending_prompt",
+    });
+    finish.resolve();
+    expect(await manager.unloadAgentIfIdle(input)).toMatchObject({ status: "unloaded" });
+  } finally {
+    finish.resolve();
+    await manager.closeAgent(agent.id);
+  }
+});
+
+test("metadata queued while native idle inspection is pending prevents unloading", async () => {
+  const logger = createTestLogger();
+  const inspecting = deferred<void>(),
+    observed = deferred<void>();
+  let session: CloseRecordingTestAgentSession | undefined;
+  const client = new (class extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      session = new (class extends CloseRecordingTestAgentSession {
+        override async getRuntimeIdleState(): Promise<"idle"> {
+          inspecting.resolve();
+          await observed.promise;
+          return "idle";
+        }
+      })(config);
+      return session;
+    }
+  })();
+  const manager = new AgentManager({ clients: { codex: client }, logger });
+  const agent = await manager.createAgent({ provider: "codex", cwd: process.cwd() }, undefined, {});
+  try {
+    const unloading = manager.unloadAgentIfIdle({
+      agentId: agent.id,
+      expectedUpdatedAt: agent.updatedAt.toISOString(),
+      expectedRuntimeGeneration: agent.runtimeGeneration ?? "",
+      idleForMs: 0,
+      protection: () => null,
+    });
+    await inspecting.promise;
+    const updated = manager.updateAgentMetadata(agent.id, { labels: { preserve: "true" } });
+    observed.resolve();
+    expect(await unloading).toMatchObject({ status: "retained", reason: "state_changed" });
+    await updated;
+    expect(session?.closed).toBe(false);
+  } finally {
+    observed.resolve();
+    await manager.closeAgent(agent.id);
+  }
+});
+
+test("unloaded conversations resume under the same identity and reject stale runtime requests", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "paseo-idle-resume-"));
+  const logger = createTestLogger();
+  const storage = new AgentStorage(workdir, logger);
+  const client = new (class extends TestAgentClient {
+    readonly resumed: AgentPersistenceHandle[] = [];
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new CloseRecordingTestAgentSession(config);
+    }
+    override async resumeSession(
+      handle: AgentPersistenceHandle,
+      config?: Partial<AgentSessionConfig>,
+    ): Promise<AgentSession> {
+      this.resumed.push(handle);
+      return new (class extends CloseRecordingTestAgentSession {
+        override readonly id = handle.sessionId;
+      })({ provider: "codex", cwd: config?.cwd ?? workdir });
+    }
+  })();
+  const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+  const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {});
+  const original = {
+    agentId: agent.id,
+    expectedUpdatedAt: agent.updatedAt.toISOString(),
+    expectedRuntimeGeneration: agent.runtimeGeneration ?? "",
+    idleForMs: 0,
+    protection: () => null,
+  };
+  const nativeId = agent.persistence?.sessionId;
+  try {
+    expect(await manager.unloadAgentIfIdle({ ...original, idleForMs: 60000 })).toMatchObject({
+      status: "retained",
+      reason: "idle_period_not_elapsed",
+    });
+    expect(await manager.unloadAgentIfIdle(original)).toMatchObject({ status: "unloaded" });
+    const record = await storage.get(agent.id);
+    expect(record?.archivedAt).toBeFalsy();
+    expect(record?.persistence?.sessionId).toBe(nativeId);
+    const restored = await ensureAgentLoaded(agent.id, {
+      agentManager: manager,
+      agentStorage: storage,
+      logger,
+    });
+    expect(restored.id).toBe(agent.id);
+    expect(restored.persistence?.sessionId).toBe(nativeId);
+    expect(restored.runtimeGeneration).not.toBe(original.expectedRuntimeGeneration);
+    expect(await manager.unloadAgentIfIdle(original)).toMatchObject({
+      status: "retained",
+      reason: "runtime_changed",
+    });
+  } finally {
+    await manager.closeAgent(agent.id);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
 
 class SteeringTestSession extends TestAgentSession {
   interruptCount = 0;

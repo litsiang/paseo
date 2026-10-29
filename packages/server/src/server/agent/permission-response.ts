@@ -22,6 +22,15 @@ export interface RespondToAgentPermissionParams {
 export async function respondToAgentPermission(
   params: RespondToAgentPermissionParams,
 ): Promise<void> {
+  const release = params.agentManager.holdAgentRuntime(params.agentId);
+  try {
+    await respondToAgentPermissionHeld(params);
+  } finally {
+    release();
+  }
+}
+
+async function respondToAgentPermissionHeld(params: RespondToAgentPermissionParams): Promise<void> {
   const { agentManager, agentId, requestId, response, logger } = params;
   logger.debug(
     { agentId, requestId },

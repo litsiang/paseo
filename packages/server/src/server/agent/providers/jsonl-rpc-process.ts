@@ -1,3 +1,4 @@
+import { createRuntimeIdleCheck } from "./runtime-idle-state.js";
 import { type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { Logger } from "pino";
 
@@ -73,6 +74,7 @@ function spawnJsonlRpcProcess(launch: JsonlRpcLaunch): ChildProcessWithoutNullSt
 }
 
 export class JsonlRpcProcess {
+  private readonly idleProcessCheck: () => "idle" | "unknown";
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly diagnosticName: string;
   private readonly pending = new Map<string, PendingRequest>();
@@ -95,6 +97,7 @@ export class JsonlRpcProcess {
       },
     });
     this.child = (options.spawn ?? spawnJsonlRpcProcess)(options.launch);
+    this.idleProcessCheck = createRuntimeIdleCheck(this.child);
     this.child.stdout.on("data", (chunk) => {
       this.handleStdoutChunk(chunk.toString());
     });
@@ -120,6 +123,10 @@ export class JsonlRpcProcess {
       }
       this.failAll(error);
     });
+  }
+
+  getRuntimeProcessIdleState(): "idle" | "unknown" {
+    return this.idleProcessCheck();
   }
 
   onMessage(callback: (message: Record<string, unknown>) => void): () => void {

@@ -20,7 +20,7 @@ import type {
   AgentSessionConfig,
   AgentStreamEvent,
 } from "../agent/agent-sdk-types.js";
-import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
+import { createTestAgentClient, createTestAgentClients } from "../test-utils/fake-agent-client.js";
 import { validateProviderOptions } from "../agent/provider-options.js";
 import { ClaudeProviderOptionsSchema } from "../agent/providers/claude/options.js";
 import { createTestLogger } from "../../test-utils/test-logger.js";
@@ -495,6 +495,71 @@ describe("ScheduleService", () => {
       expect.stringContaining(`Schedule fired (id=${schedule.id}, run=`),
       undefined,
     ]);
+  });
+
+  test("retains a schedule target while its runtime is being loaded for dispatch", async () => {
+    const client = createTestAgentClient("claude");
+    const createSession = client.createSession.bind(client);
+    vi.spyOn(client, "createSession").mockImplementation(async (...args) => {
+      const session = await createSession(...args);
+      session.getRuntimeProcessIdleState = () => "idle";
+      session.getRuntimeIdleState = async () => "idle";
+      return session;
+    });
+    const manager = new AgentManager({
+      logger: createTestLogger(),
+      clients: { claude: client },
+      registry: agentStorage,
+    });
+    const agent = await manager.createAgent({ provider: "claude", cwd: tempDir }, undefined, {});
+    let signalLoading!: () => void;
+    const loading = new Promise<void>((resolve) => {
+      signalLoading = resolve;
+    });
+    let allowLoading!: () => void;
+    const continueLoading = new Promise<void>((resolve) => {
+      allowLoading = resolve;
+    });
+    const waitForClose = manager.waitForAgentClose.bind(manager);
+    vi.spyOn(manager, "waitForAgentClose").mockImplementationOnce(async (agentId) => {
+      await waitForClose(agentId);
+      signalLoading();
+      await continueLoading;
+    });
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      logger: createTestLogger(),
+      agentManager: manager,
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    const schedule = await service.create({
+      prompt: "Check scheduled work",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "agent", agentId: agent.id },
+    });
+    const run = service.runOnce(schedule.id);
+    void run.catch(() => undefined);
+    try {
+      await loading;
+      expect(
+        await manager.unloadAgentIfIdle({
+          agentId: agent.id,
+          expectedUpdatedAt: agent.updatedAt.toISOString(),
+          expectedRuntimeGeneration: agent.runtimeGeneration ?? "",
+          idleForMs: 0,
+          protection: () => null,
+        }),
+      ).toMatchObject({ status: "retained", reason: "pending_prompt" });
+      allowLoading();
+      await run;
+      expect((await service.inspect(schedule.id)).runs[0]?.status).toBe("succeeded");
+    } finally {
+      allowLoading();
+      await run.catch(() => undefined);
+      await manager.closeAgent(agent.id);
+    }
   });
 
   test("titles scheduled new agents from the schedule prompt", async () => {

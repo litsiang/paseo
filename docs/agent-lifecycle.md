@@ -25,8 +25,35 @@ Reload releases the old runtime before resuming its durable session: an idle pro
 still own an exclusive writer. A close failure retains that runtime for cleanup and blocks the
 replacement. Once closure succeeds, a failed resume leaves the durable agent closed and retryable.
 
-Idle agents remain resident indefinitely. Runtime closure happens only through an explicit lifecycle
-action such as archive, replacement, reload, workspace teardown, or daemon shutdown.
+Idle agents remain resident by default. Hosts can opt known ordinary workers into conditional
+runtime unloading with an owner-controlled `runtime-reclamation.json` in `PASEO_HOME`:
+
+```json
+{
+  "schemaVersion": 1,
+  "workerAgentIds": ["11111111-1111-4111-8111-111111111111"],
+  "protectedAgentIds": ["22222222-2222-4222-8222-222222222222"]
+}
+```
+
+The file must be a canonical regular file owned by the daemon user without group/other write
+permission. Missing or ambiguous policy retains the runtime. Labels never grant eligibility;
+register coordinators in the protection list before assigning that role.
+
+On Linux, the `idleRuntimeUnload` feature gates `agent.runtime.unload.request` and
+`DaemonClient.unloadAgentIfIdle`. The request carries the inspected `updatedAt`, transient
+`runtimeGeneration`, and minimum idle period. Accepted prompts reserve the runtime before storage
+or provider startup awaits. Lifecycle work rechecks policy, client focus, pending work, permissions,
+native background work and both identities immediately before closing. A later prompt waits for
+closure and resumes the original conversation. A restored runtime receives a new generation even
+when its persisted timestamps are unchanged, so an old unload cannot close the replacement.
+
+`runtimeLastActivityAt` tracks native work rather than usage polling. The daemon does not run an
+automatic idle timer: the host scheduler selects eligible candidates and records actual process
+exit. An unconfirmed close returns `unknown`; it must be reconciled before another attempt.
+A surviving child process (including an opaque CLI wrapper or helper) retains its runtime when
+the provider cannot establish that child's lifecycle. Native queue emptiness alone is insufficient.
+Archive, replacement, reload, workspace teardown, and shutdown retain their explicit semantics.
 
 A provider runtime can still die on its own — crash, OOM kill, host suspend. Work the agent parked
 inside that process dies with it: Claude Code's background Bash shells, `Monitor` watches, and
