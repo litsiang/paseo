@@ -3,6 +3,7 @@ const ELECTRON_RUN_AS_NODE = "ELECTRON_RUN_AS_NODE";
 
 const RUNTIME_CONTROL_ENV_KEYS = [
   PASEO_NODE_ENV,
+  "PASEO_OWNER_CONTROL_CONFIG",
   "PASEO_DESKTOP_MANAGED",
   "PASEO_SUPERVISED",
   ELECTRON_RUN_AS_NODE,
@@ -64,6 +65,7 @@ export function buildSelfNodeCommand(
 } {
   const env = buildExternalProcessEnv(process.env, []);
   Object.assign(env, { [ELECTRON_RUN_AS_NODE]: "1" }, envOverlay);
+  delete env.PASEO_OWNER_CONTROL_CONFIG;
   for (const [key, value] of Object.entries(env)) {
     if (value === undefined) {
       delete env[key];

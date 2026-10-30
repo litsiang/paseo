@@ -1,3 +1,4 @@
+import { loadOwnerControlBridge } from "./session/owner-control/bridge.js";
 import { createAgentMcpAccessCandidate } from "./agent/mcp-access.js";
 import { describeHookWorkspace } from "./plugins/lifecycle/index.js";
 import express from "express";
@@ -576,6 +577,12 @@ export async function createPaseoDaemon(
     enabled: agentIsolationCandidate,
     password: config.auth?.password,
   });
+  const ownerControlBridge = await loadOwnerControlBridge({
+    agentIsolationEnabled: agentIsolationCandidate,
+    configPath: process.env.PASEO_OWNER_CONTROL_CONFIG,
+    auth: config.auth,
+  });
+  delete process.env.PASEO_OWNER_CONTROL_CONFIG;
   configureGitProcessPolicy(config.git ?? resolveGitProcessPolicy({ env: process.env }));
   const logger = rootLogger.child({ module: "bootstrap" });
   const obsoleteTimelineDirectory = path.join(config.paseoHome, "agent-timelines");
@@ -1684,6 +1691,7 @@ export async function createPaseoDaemon(
                 daemonStatusRpc: dependencies.serverFeatureOverrides?.daemonStatusRpc,
                 relayConfig: dependencies.serverFeatureOverrides?.relayConfig,
                 startPaused: true,
+                ownerControlBridge,
               },
               workspaceAutoName,
               config.auth,
