@@ -1,3 +1,4 @@
+import { assertWorkerExecutionSupported } from "../../utils/worker-execution.js";
 import type { PluginBeforeRequests, PluginLifecycleEvents } from "@getpaseo/plugin/server";
 import { validateBeforeRequest, validateBeforeResult } from "./lifecycle/index.js";
 import { fork } from "node:child_process";
@@ -205,6 +206,7 @@ function resolveWorkerExecArgv(): string[] {
 }
 
 function spawnPluginChild(): PluginChild {
+  assertWorkerExecutionSupported({ exit: "plugin" });
   return fork(fileURLToPath(resolveWorkerUrl()), [], {
     execArgv: resolveWorkerExecArgv(),
     serialization: "advanced",
@@ -302,6 +304,7 @@ export class PluginRuntime {
     configuredPath: string,
     canPublish: () => boolean = () => true,
   ): Promise<void> {
+    assertWorkerExecutionSupported({ exit: "plugin" });
     if (this.plugins.has(pluginId)) throw new Error(`Plugin is already running: ${pluginId}`);
     this.appendLog(pluginId, "stdout", "[paseo] Loading plugin");
     const loaded = await this.loadDirectoryPlugin(pluginId, configuredPath).catch((error) => {

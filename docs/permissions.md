@@ -70,6 +70,20 @@ and script path, and a reviewed owner-only operation bridge. Those deployment
 and bridge changes are outside this candidate; fixture tests are not evidence
 of production isolation.
 
+## Required worker execution exits
+
+`LOOM_WORKER_ISOLATION=required` refuses provider creation/catalog probes,
+ordinary process execution, PTY terminals, workspace script launch, native MCP
+catalogs and plugin builds/runtime loading until those exits have a connected
+worker transport. The actual provider registry covers built-in and derived ACP
+profiles; new provider IDs cannot bypass this gate. Default mode is unchanged.
+
+This is an unsupported-exit gate, not a working provider migration. Required
+mode may refuse daemon startup before provider probes can execute. No provider,
+terminal or script has been made usable under a separate UID by these guards.
+Keep the mode disabled until the fixed transport, readonly inputs, worker
+credentials and real identity/cancellation acceptance are connected and approved.
+
 ## Hub
 
 The Hub authenticates as a service principal. Its locally selected grants decide whether it may execute agents, manage the daemon, manage tunnels, or manage access.

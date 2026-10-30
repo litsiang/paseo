@@ -1,3 +1,4 @@
+import { assertWorkerExecutionSupported } from "./worker-execution.js";
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { extname } from "node:path";
 import { promisify } from "node:util";
@@ -57,6 +58,7 @@ export function spawnProcess(
   args: string[],
   options?: SpawnProcessOptions,
 ): ChildProcess {
+  assertWorkerExecutionSupported({ exit: "process" });
   const { baseEnv, env, envOverlay, ...spawnOptions } = options ?? {};
   const resolvedBaseEnv = env ?? baseEnv ?? process.env;
   const isWindows = process.platform === "win32";
@@ -88,6 +90,7 @@ export async function execCommand(
   args: string[],
   options?: ExecCommandOptions,
 ): Promise<ExecCommandResult> {
+  assertWorkerExecutionSupported({ exit: "process" });
   const { baseEnv, env, envOverlay } = options ?? {};
   const resolvedBaseEnv = env ?? baseEnv ?? process.env;
   const isWindows = process.platform === "win32";

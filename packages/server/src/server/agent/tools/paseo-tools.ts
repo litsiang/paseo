@@ -1,3 +1,4 @@
+import { assertWorkerExecutionSupported } from "../../../utils/worker-execution.js";
 import { AgentMcpScopeError, isAgentObservationTool } from "../mcp-access.js";
 import { z } from "zod";
 import { ensureValidJson } from "../../json-utils.js";
@@ -544,6 +545,7 @@ function resolveTerminalKeyToken(key: string, literal: boolean): string {
 }
 
 export function createPaseoToolCatalog(options: PaseoToolHostDependencies): PaseoToolCatalog {
+  assertWorkerExecutionSupported({ exit: "mcp" });
   const {
     agentManager,
     agentStorage,

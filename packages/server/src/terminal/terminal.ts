@@ -1,3 +1,4 @@
+import { assertWorkerExecutionSupported } from "../utils/worker-execution.js";
 import * as pty from "node-pty";
 import xterm, { type Terminal as TerminalType } from "@xterm/headless";
 import { randomUUID } from "crypto";
@@ -883,6 +884,7 @@ function extractLastOutputLinesFromText(text: string, limit: number): string[] {
 }
 
 export async function createTerminal(options: CreateTerminalOptions): Promise<TerminalSession> {
+  assertWorkerExecutionSupported({ exit: "terminal" });
   const {
     cwd,
     workspaceId,

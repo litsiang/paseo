@@ -1,3 +1,4 @@
+import { assertWorkerExecutionSupported } from "../../utils/worker-execution.js";
 import type { Logger } from "pino";
 import type { ProviderOptions, ToolPolicy } from "@getpaseo/protocol/agent-types";
 import { z } from "zod";
@@ -586,6 +587,7 @@ function createRegistryEntry(
   provider: AgentProvider,
   resolved: ResolvedProvider,
 ): ProviderDefinition {
+  assertWorkerExecutionSupported({ exit: "provider", providerId: provider });
   const modelClient = resolved.createBaseClient(logger);
   const profileModels = resolveConfiguredModels(provider, modelClient, resolved.profileModels);
   const additionalModels = resolveConfiguredModels(
@@ -643,6 +645,7 @@ function createRegistryEntry(
       client?: AgentClient,
       context?: ProviderRefreshContext,
     ) => {
+      assertWorkerExecutionSupported({ exit: "provider", providerId: provider });
       const catalogClient = client ?? modelClient;
       if (hasReplacementModels) {
         // Replacement models skip runtime model discovery, but additionalModels
@@ -689,6 +692,7 @@ function createResolvedProviderClient(
   provider: AgentProvider,
   resolved: ResolvedProvider,
 ): AgentClient {
+  assertWorkerExecutionSupported({ exit: "provider", providerId: provider });
   const inner = resolved.createBaseClient(logger);
   const profileModels = resolveConfiguredModels(provider, inner, resolved.profileModels);
   const additionalModels = resolveConfiguredModels(provider, inner, resolved.additionalModels);
