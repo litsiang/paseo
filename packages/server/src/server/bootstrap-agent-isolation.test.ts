@@ -42,9 +42,15 @@ describe("unactivated agent isolation candidate", () => {
       capabilities: remoteDelegate.capabilities,
       createSession: async (config, context) => {
         remoteLaunches.push({ config, context });
-        return remoteDelegate.createSession(config, context);
+        const session = await remoteDelegate.createSession(config, context);
+        session.getRuntimeProcessIdleState = () => "idle";
+        session.getRuntimeIdleState = async () => "idle";
+        return session;
       },
-      resumeSession: remoteDelegate.resumeSession.bind(remoteDelegate),
+      resumeSession: async (persistence, overrides, context, options) => {
+        remoteLaunches.push({ config: { ...remoteLaunches[0].config, ...overrides }, context });
+        return remoteDelegate.resumeSession(persistence, overrides, context, options);
+      },
       isAvailable: remoteDelegate.isAvailable.bind(remoteDelegate),
       fetchCatalog: remoteDelegate.fetchCatalog.bind(remoteDelegate),
     };
@@ -123,8 +129,46 @@ describe("unactivated agent isolation candidate", () => {
       expect((await owner.listTools()).tools.some((tool) => tool.name === "create_terminal")).toBe(
         true,
       );
-      await handle.daemon.agentManager.archiveAgent(remoteAgent.id);
+      const persistence = remoteAgent.persistence;
+      if (!persistence) throw new Error("Expected a resumable test provider");
+      expect(
+        await handle.daemon.agentManager.unloadAgentIfIdle({
+          agentId: remoteAgent.id,
+          expectedUpdatedAt: remoteAgent.updatedAt.toISOString(),
+          expectedRuntimeGeneration: remoteAgent.runtimeGeneration ?? "",
+          idleForMs: 0,
+          protection: () => null,
+        }),
+      ).toMatchObject({ status: "unloaded", agentId: remoteAgent.id });
+      const resumed = await handle.daemon.agentManager.resumeAgentFromPersistence(
+        persistence,
+        remoteAgent.config,
+        remoteAgent.id,
+      );
+      expect(resumed.id).toBe(remoteAgent.id);
+      const resumedTokenConfig = remoteLaunches[1]?.config.mcpServers?.paseo;
+      if (
+        !resumedTokenConfig ||
+        resumedTokenConfig.type !== "http" ||
+        !resumedTokenConfig.headers?.Authorization
+      ) {
+        throw new Error("Expected replacement MCP credential after idle resume");
+      }
+      const resumedAuthorization = resumedTokenConfig.headers.Authorization;
+      expect(resumedAuthorization).not.toBe(authorization);
       await expect(connect(authorization)).rejects.toThrow();
+      const resumedConnection = await connect(resumedAuthorization);
+      expect((await resumedConnection.listTools()).tools.map((tool) => tool.name).sort()).toEqual([
+        "get_agent_status",
+        "list_agents",
+      ]);
+      const resumedOther = await resumedConnection.callTool({
+        name: "get_agent_status",
+        arguments: { agentId: agent.id },
+      });
+      expect(resumedOther.isError).toBe(true);
+      await handle.daemon.agentManager.archiveAgent(remoteAgent.id);
+      await expect(connect(resumedAuthorization)).rejects.toThrow();
     } finally {
       await Promise.allSettled(connections.map((connection) => connection.close()));
       await handle.close();
