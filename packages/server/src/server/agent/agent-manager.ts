@@ -301,6 +301,7 @@ export interface AgentManagerOptions {
   terminalManager?: TerminalManager | null;
   mcpBaseUrl?: string;
   mcpAuthToken?: string;
+  issueAgentMcpToken?: (agentId: string) => string;
   paseoToolsEnabled?: boolean;
   paseoToolCatalogFactory?: PaseoToolCatalogFactory;
   resolvePaseoToolPolicy?: (provider: AgentProvider) => ProviderPaseoToolsPolicy | undefined;
@@ -738,6 +739,7 @@ export class AgentManager {
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
   private mcpBaseUrl: string | null;
   private readonly mcpAuthToken: string | null;
+  private readonly issueAgentMcpToken: AgentManagerOptions["issueAgentMcpToken"];
   private paseoToolsEnabled = true;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
   private readonly paseoToolPolicies = new Map<string, ProviderPaseoToolsPolicy | undefined>();
@@ -762,6 +764,7 @@ export class AgentManager {
     this.onWorkspaceStateMayHaveChanged = options?.onWorkspaceStateMayHaveChanged;
     this.mcpBaseUrl = options?.mcpBaseUrl ?? null;
     this.mcpAuthToken = options?.mcpAuthToken ?? null;
+    this.issueAgentMcpToken = options.issueAgentMcpToken;
     this.configurePaseoTools(options);
     this.resolvePaseoToolPolicy = options.resolvePaseoToolPolicy ?? (() => undefined);
     this.appendSystemPrompt = options.appendSystemPrompt ?? "";
@@ -5202,7 +5205,9 @@ export class AgentManager {
           this.paseoToolsEnabled && isPaseoToolPolicyEnabled(paseoToolPolicy)
             ? this.mcpBaseUrl
             : null,
-        mcpAuthToken: this.mcpAuthToken,
+        mcpAuthToken: this.issueAgentMcpToken
+          ? this.issueAgentMcpToken(agentId)
+          : this.mcpAuthToken,
       }),
     );
     return { storedConfig, launchConfig, paseoToolPolicy };
