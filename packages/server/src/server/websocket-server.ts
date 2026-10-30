@@ -1,3 +1,4 @@
+import type { OwnerControlBridge, OwnerControlOrigin } from "./session/owner-control/bridge.js";
 import { AgentRequests } from "./agent/requests/index.js";
 import { WebSocket, WebSocketServer } from "ws";
 import type { IncomingMessage, Server as HTTPServer } from "http";
@@ -122,6 +123,7 @@ export interface ExternalSocketMetadata {
 }
 
 export interface SessionAdmission {
+  authenticatedOwner?: boolean;
   principalId: string;
   permissions: readonly DaemonPermission[];
   hubExecutionAgents?: HubExecutionAgents;
@@ -151,6 +153,7 @@ interface WebSocketConnectionIdentity {
 }
 
 interface WebSocketServerConfig {
+  ownerControlBridge?: OwnerControlBridge | null;
   allowedOrigins?: Set<string>;
   hostnames?: HostnamesConfig;
   getAllowedOrigins?: () => Set<string>;
@@ -469,6 +472,7 @@ interface BrowserToolsRegistration {
 }
 
 interface SocketSessionOptions {
+  ownerControlOrigin: OwnerControlOrigin;
   clientId: string;
   appVersion: string | null;
   clientCapabilities: Record<string, unknown> | null;
@@ -547,6 +551,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly daemonRuntimeConfig: DaemonRuntimeConfig | undefined;
   private readonly agentManager: AgentManager;
   private readonly agentStorage: AgentStorage;
+  private readonly ownerControlBridge: OwnerControlBridge | null;
   private readonly agentRequests: AgentRequests;
   private readonly projectRegistry: ProjectRegistry;
   private readonly workspaceRegistry: WorkspaceRegistry;
@@ -652,6 +657,7 @@ export class VoiceAssistantWebSocketServer {
     workspaceLabelService?: WorkspaceLabelService,
   ) {
     this.logger = logger.child({ module: "websocket-server" });
+    this.ownerControlBridge = wsConfig.ownerControlBridge ?? null;
     this.workspaceSetupRuntime = workspaceSetupRuntime;
     this.advertiseDaemonStatusRpc = wsConfig.daemonStatusRpc !== false;
     this.advertiseRelayConfig = wsConfig.relayConfig !== false;
@@ -919,7 +925,10 @@ export class VoiceAssistantWebSocketServer {
       }
     }
 
-    await this.attachSocket(ws, request);
+    await this.attachSocket(ws, request, undefined, false, {
+      ...OWNER_SESSION_ADMISSION,
+      authenticatedOwner: Boolean(password),
+    });
   }
 
   public broadcast(message: WSOutboundMessage): void {
@@ -972,7 +981,14 @@ export class VoiceAssistantWebSocketServer {
     if (metadata?.transport === "relay") {
       this.incrementRuntimeCounter("relayExternalSocketAttached");
     }
-    await this.attachSocket(ws, undefined, metadata, false, admission, initialHello);
+    await this.attachSocket(
+      ws,
+      undefined,
+      metadata,
+      false,
+      { ...admission, authenticatedOwner: false },
+      initialHello,
+    );
   }
 
   public async attachPluginSocket(
@@ -1320,6 +1336,10 @@ export class VoiceAssistantWebSocketServer {
       appVersion,
       clientCapabilities,
       permissions: admission.permissions,
+      ownerControlOrigin:
+        admission.authenticatedOwner === true && admission.principalId === "owner"
+          ? { kind: "authenticated-owner", principalId: "owner" }
+          : { kind: "untrusted" },
       connectionLogger,
       onMessage: (msg) => {
         if (!connection) {
@@ -1371,7 +1391,11 @@ export class VoiceAssistantWebSocketServer {
     const base: SessionConnectionBase = {
       session,
       principalId: admission.principalId,
-      sessionKey: sessionConnectionKey(admission.principalId, clientId),
+      sessionKey: sessionConnectionKey(
+        admission.principalId,
+        clientId,
+        admission.authenticatedOwner === true,
+      ),
       clientId,
       appVersion,
       clientCapabilities,
@@ -1392,6 +1416,8 @@ export class VoiceAssistantWebSocketServer {
       appVersion: options.appVersion,
       clientCapabilities: options.clientCapabilities,
       permissions: options.permissions,
+      ownerControlOrigin: options.ownerControlOrigin,
+      ownerControlBridge: this.ownerControlBridge,
       onMessage: options.onMessage,
       onMessageToSource: options.onMessageToSource,
       onBinaryMessage: options.onBinaryMessage,
@@ -1546,7 +1572,11 @@ export class VoiceAssistantWebSocketServer {
     if (message.appVersion) {
       pending.identity.appVersion = message.appVersion;
     }
-    const sessionKey = sessionConnectionKey(pending.admission.principalId, clientId);
+    const sessionKey = sessionConnectionKey(
+      pending.admission.principalId,
+      clientId,
+      pending.admission.authenticatedOwner === true,
+    );
     const existing = pluginId ? undefined : this.externalSessionsByKey.get(sessionKey);
     if (existing) {
       this.resumeSession({ ws, message, pending, existing });
@@ -2713,8 +2743,12 @@ function createWebSocketConnectionIdentity(
   };
 }
 
-function sessionConnectionKey(principalId: string, clientId: string): string {
-  return JSON.stringify([principalId, clientId]);
+function sessionConnectionKey(
+  principalId: string,
+  clientId: string,
+  authenticatedOwner: boolean,
+): string {
+  return JSON.stringify([principalId, clientId, authenticatedOwner]);
 }
 
 function toConnectionLogFields(identity: WebSocketConnectionIdentity): Record<string, string> {

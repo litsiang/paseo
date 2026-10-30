@@ -1,3 +1,9 @@
+import {
+  isOwnerControlCommand,
+  OwnerControlError,
+  type OwnerControlBridge,
+  type OwnerControlOrigin,
+} from "./session/owner-control/bridge.js";
 import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
 import type { AgentRequests } from "./agent/requests/index.js";
 import { runtimeReclamationProtection } from "./agent/runtime-reclamation-policy.js";
@@ -447,6 +453,8 @@ const nodeSessionFileSystem: SessionFileSystem = {
 type AgentMcpTransportFactory = () => Promise<unknown>;
 
 export interface SessionOptions {
+  ownerControlOrigin?: OwnerControlOrigin;
+  ownerControlBridge?: OwnerControlBridge | null;
   clientId: string;
   permissions: readonly DaemonPermission[];
   appVersion?: string | null;
@@ -657,6 +665,8 @@ function workspaceLabelErrorCode(error: unknown): string {
 }
 
 export class Session {
+  private readonly ownerControlOrigin: OwnerControlOrigin | undefined;
+  private readonly ownerControlBridge: OwnerControlBridge | null | undefined;
   private readonly clientId: string;
   private readonly authorization: SessionAuthorization;
   private appVersion: string | null;
@@ -762,6 +772,8 @@ export class Session {
 
   constructor(options: SessionOptions) {
     this.isAgentRuntimeFocused = options.isAgentRuntimeFocused;
+    this.ownerControlOrigin = options.ownerControlOrigin;
+    this.ownerControlBridge = options.ownerControlBridge;
     const {
       clientId,
       permissions,
@@ -7613,9 +7625,67 @@ export class Session {
     }
   }
 
+  private async handleOwnerControlMessage(
+    msg: Extract<SessionInboundMessage, { type: "send_agent_message_request" }>,
+  ): Promise<void> {
+    let error: string | null = null;
+    let accepted = false;
+    try {
+      if (!this.ownerControlBridge)
+        throw new OwnerControlError("disabled", "Owner controls are disabled");
+      const console =
+        this.agentManager.getAgent(msg.agentId) ?? (await this.agentStorage.get(msg.agentId));
+      if (!console)
+        throw new OwnerControlError("console_not_registered", "Owner console is not registered");
+      const receipt = await this.ownerControlBridge.execute({
+        origin: this.ownerControlOrigin ?? { kind: "untrusted" },
+        consoleId: msg.agentId,
+        messageId: msg.messageId,
+        text: msg.text,
+      });
+      accepted = receipt.status !== "rejected";
+      const timestamp = new Date().toISOString();
+      this.emit({
+        type: "agent_stream",
+        payload: {
+          agentId: msg.agentId,
+          timestamp,
+          event: {
+            type: "timeline",
+            provider: console.provider,
+            item: {
+              type: "notification",
+              level: accepted ? "info" : "warning",
+              message: JSON.stringify(receipt),
+            },
+          },
+        },
+      });
+      if (!accepted) error = receipt.error?.message ?? "Owner operation was rejected";
+    } catch (failure) {
+      error =
+        failure instanceof OwnerControlError
+          ? failure.message
+          : "Owner control request failed safely; retry the same message";
+    }
+    this.emit({
+      type: "send_agent_message_response",
+      payload: {
+        requestId: msg.requestId,
+        agentId: msg.agentId,
+        accepted,
+        error,
+      },
+    });
+  }
+
   private async handleSendAgentMessageRequest(
     msg: Extract<SessionInboundMessage, { type: "send_agent_message_request" }>,
   ): Promise<void> {
+    if (isOwnerControlCommand(msg.text)) {
+      await this.handleOwnerControlMessage(msg);
+      return;
+    }
     const resolved = await this.resolveAgentIdentifier(msg.agentId);
     if (!resolved.ok) {
       this.emit({

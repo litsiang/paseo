@@ -70,6 +70,53 @@ and script path, and a reviewed owner-only operation bridge. Those deployment
 and bridge changes are outside this candidate; fixture tests are not evidence
 of production isolation.
 
+## Owner command bridge candidate
+
+The bridge remains disabled unless `PASEO_OWNER_CONTROL_CONFIG` points to a
+protected JSON configuration. Enabling it requires `PASEO_AGENT_ISOLATION_CANDIDATE=1` and owner password authentication;
+only a successfully password-authenticated direct WebSocket can authorize an
+operation. External/relay, Hub, plugin and agent admissions cannot inherit that
+proof, including through a reused client ID. They require a separately verified
+owner credential integration before they can use this bridge.
+
+Existing chat accepts an explicit command such as:
+
+```text
+/loom query {"target":{"kind":"run","runId":"registered-run"},"payload":{"view":"status"}}
+/loom demand {"target":{"kind":"issue","repository":"litsiang/Loom","number":93},"payload":{"text":"original demand"}}
+/loom pause {"target":{"kind":"run","runId":"registered-run"},"payload":{}}
+/loom cancel {"target":{"kind":"run","runId":"registered-run"},"payload":{}}
+```
+
+Only configured console IDs may submit operations. The configured project and
+repository fix the receiver scope. A normal chat message, agent prompt or timer
+cannot mint an owner operation. Invalid/reserved commands fail without entering
+a model turn. Successful and domain-rejected receipts appear as existing timeline
+notifications; they do not resume an unloaded model. The protected receipt journal
+retains results across reconnects; notifications themselves are live UI delivery.
+
+The version-1 configuration contains `project`, `repository`, `consoleIds`,
+`socketPath`, `backendUid`, `tokenFile` and `journalDirectory`. Configuration and
+token files must be owner/admin-readable only; journal directories must be
+owner-only. Linux directory-FD walking and `O_NOFOLLOW` reject symlinked or
+worker-writable ancestors; only the administrative `/tmp` sticky directory has a
+narrow exception, with all descendants checked and pinned. The filesystem root
+must be UID 0. The backend socket owner must match `backendUid`, and world access
+is refused. The dedicated token is never the daemon password or an agent token.
+The configuration environment variable is consumed during startup and removed
+from provider command environments.
+
+Each UI message ID gets one server-generated operation UUID, saved durably before
+Unix HTTP delivery. Retry an unknown outcome using the same message ID and exact
+command; the bridge reuses its saved envelope. Reusing that ID for changed content
+fails. Completed local receipts are returned without resending. Cancellation
+`accepted` means only that the backend accepted the request; read its stop result
+before treating a process as stopped. Pending demand does not authorize a new run.
+
+This disabled candidate still depends on separate worker UIDs, protected owner
+credentials/code, receiver installation and approved activation. No fixture test
+establishes production isolation.
+
 ## Hub
 
 The Hub authenticates as a service principal. Its locally selected grants decide whether it may execute agents, manage the daemon, manage tunnels, or manage access.
