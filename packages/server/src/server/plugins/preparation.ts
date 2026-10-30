@@ -1,3 +1,4 @@
+import { assertWorkerExecutionSupported } from "../../utils/worker-execution.js";
 import { spawn } from "node:child_process";
 import type pino from "pino";
 import type { PluginManifest } from "./manifest.js";
@@ -30,6 +31,7 @@ export async function runPluginBuild(
 }
 
 function run(command: string[], directory: string): Promise<CommandResult> {
+  assertWorkerExecutionSupported({ exit: "plugin" });
   return new Promise((resolve) => {
     const executable = command[0]!;
     const arguments_ = command.slice(1);

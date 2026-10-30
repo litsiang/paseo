@@ -1,3 +1,4 @@
+import { assertWorkerExecutionSupported } from "../../../utils/worker-execution.js";
 import type pino from "pino";
 import type {
   SessionOutboundMessage,
@@ -169,6 +170,7 @@ export function createWorkspaceScriptsService(deps: {
   }
 
   async function launchProcess(input: { workspaceId: string; scriptName: string }) {
+    assertWorkerExecutionSupported({ exit: "workspace-script" });
     const available = requireAvailable();
     const workspace = await getWorkspace(input.workspaceId);
     await assertAutomationAllowed(workspace.workspaceId);
